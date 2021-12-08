@@ -10,7 +10,7 @@ terraform {
 }
 
 provider "aws" {
-  profile = "personal"
+  profile = "default"
   region  = "us-east-2"
 }
 
@@ -23,11 +23,11 @@ variable "cidr"{
 }
 
 variable "public-cidr" {
-  default = "10.0.0.0/256"
+  default = "10.0.0.0/24"
 }
 
 variable "private-cidr" {
-  default = "10.0.1.0/256"
+  default = "10.0.1.0/24"
 }
 
 variable "ecs-task-role" {
@@ -39,7 +39,7 @@ variable "ecs-task-execution-role" {
 }
 
 variable "container_port" {
-  default = "8000"
+  default = 8000
 }
 
 variable "health_check_path" {
@@ -64,7 +64,7 @@ resource "aws_subnet" "public" {
 resource "aws_subnet" "private" {
   vpc_id = aws_vpc.main.id
   cidr_block = var.private-cidr
-  availability_zone = data.aws_availability_zones.available.names[0]
+  availability_zone = data.aws_availability_zones.available.names[1]
 }
 
 resource "aws_route_table" "public" {
@@ -97,7 +97,7 @@ resource "aws_route_table" "private" {
 }
 
 resource "aws_route" "private" {
-  route_table_id = aws_route_table.private
+  route_table_id = aws_route_table.private.id
   destination_cidr_block = "0.0.0.0/0"
   nat_gateway_id = aws_nat_gateway.main.id
 }
@@ -184,10 +184,10 @@ resource "aws_ecs_task_definition" "main" {
   memory = 512
   execution_role_arn = var.ecs-task-role
   task_role_arn = var.ecs-task-role
-  family = "service"
+  family = "real-estate"
   container_definitions = jsonencode([{
     name = "real-estate-container"
-    image = "real-estate:latest"
+    image = "298467709983.dkr.ecr.us-east-2.amazonaws.com/real-estate-images:latest"
     essential = true
     portMappings = [
       {
@@ -196,6 +196,15 @@ resource "aws_ecs_task_definition" "main" {
         hostPort = var.container_port
       }]
   }])
+}
+
+resource "aws_lb" "main" {
+  name = "real-estate-alb"
+  internal = false
+  load_balancer_type = "application"
+  security_groups = [aws_security_group.ecs_tasks.id]
+  subnets = [aws_subnet.public.id, aws_subnet.private.id]
+  enable_deletion_protection = false
 }
 
 resource "aws_ecs_service" "main" {
@@ -209,13 +218,13 @@ resource "aws_ecs_service" "main" {
   scheduling_strategy = "REPLICA"
 
   network_configuration {
-    security_groups = aws_security_group.ecs_tasks.id
-    subnets = aws_subnet.private.id
+    security_groups = [aws_security_group.ecs_tasks.id]
+    subnets = [aws_subnet.private.id]
     assign_public_ip = false
   }
 
   load_balancer {
-    target_group_arn = aws_alb_target_group.main.id
+    target_group_arn = aws_alb_target_group.main.arn
     container_name = "real-estate-container"
     container_port = var.container_port
   }
@@ -223,15 +232,6 @@ resource "aws_ecs_service" "main" {
   lifecycle {
     ignore_changes = [task_definition, desired_count]
   }
-}
-
-resource "aws_lb" "main" {
-  name = "real-estate-alb"
-  internal = false
-  load_balancer_type = "application"
-  security_groups = aws_security_group.ecs_tasks.id
-  subnets = [aws_subnet.public.id, aws_subnet.private.id]
-  enable_deletion_protection = false
 }
 
 resource "aws_alb_target_group" "main" {
@@ -250,15 +250,18 @@ resource "aws_alb_target_group" "main" {
     path = var.health_check_path
     unhealthy_threshold = "2"
   }
+
+  depends_on = [aws_lb.main]
 }
 
 resource "aws_alb_listener" "http" {
-  load_balancer_arn = aws_lb.main.id
+  load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
 
   default_action {
-    type = "redirect"
+    type = "forward"
+    target_group_arn = aws_alb_target_group.main.arn
 
     redirect {
       port        = 8000
